@@ -124,6 +124,24 @@ document.addEventListener('DOMContentLoaded', () => {
   const imagePreviewImg = document.getElementById('imagePreviewImg');
   const imagePreviewMeta = document.getElementById('imagePreviewMeta');
 
+  // Security Audit Stage Elements
+  const viewAuditBtn = document.getElementById('viewAuditBtn');
+  const auditStage = document.getElementById('auditStage');
+  const auditGradeCircle = document.getElementById('auditGradeCircle');
+  const auditGradeText = document.getElementById('auditGradeText');
+  const auditScoreNum = document.getElementById('auditScoreNum');
+  const auditRiskBadge = document.getElementById('auditRiskBadge');
+  const auditGradeSubtitle = document.getElementById('auditGradeSubtitle');
+  const auditCriticalCount = document.getElementById('auditCriticalCount');
+  const auditHighCount = document.getElementById('auditHighCount');
+  const auditMediumCount = document.getElementById('auditMediumCount');
+  const auditLowCount = document.getElementById('auditLowCount');
+  const rescanAuditBtn = document.getElementById('rescanAuditBtn');
+  const downloadAuditReportBtn = document.getElementById('downloadAuditReportBtn');
+  const auditTechPills = document.getElementById('auditTechPills');
+  const findingsCountBadge = document.getElementById('findingsCountBadge');
+  const auditFindingsList = document.getElementById('auditFindingsList');
+
   let currentJobId = null;
   let currentFolderName = null;
   let activeEventSource = null;
@@ -133,6 +151,8 @@ document.addEventListener('DOMContentLoaded', () => {
   let currentDevice = 'desktop';
   let isLandscape = false;
   let loadedTreeFolder = null;
+  let cachedAuditReport = null;
+  let cachedTechReport = null;
 
   // Studio Lab State
   let currentZoom = 1.0;
@@ -728,7 +748,24 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="clone-meta-item"><i data-lucide="layers" class="icon-xs" style="color:var(--accent-cyan)"></i> ${pagesCount} ${pagesCount === 1 ? 'page' : 'pages'}</span>
             <span class="clone-meta-item"><i data-lucide="hard-drive" class="icon-xs" style="color:var(--accent-indigo)"></i> ${totalSize}</span>
             <span class="clone-meta-item"><i data-lucide="calendar" class="icon-xs" style="color:var(--text-muted)"></i> ${dateStr}</span>
+            ${site.securityScore ? `
+              <span class="vault-security-pill grade-${(site.securityScore.grade || 'A').toLowerCase().replace('+', '')}" title="Security Score: ${site.securityScore.score}/100 (${site.securityScore.riskLevel})">
+                <i data-lucide="shield-check" class="icon-xs"></i> ${site.securityScore.grade} (${site.securityScore.score})
+              </span>
+            ` : ''}
           </div>
+
+          ${site.techStack && site.techStack.length > 0 ? `
+            <div class="vault-tech-row">
+              ${site.techStack.slice(0, 4).map(t => `
+                <span class="vault-tech-chip" title="${t.category}: ${t.name}">
+                  <span class="tech-chip-dot" style="background:${t.color || '#38bdf8'}"></span>
+                  <span>${t.name}</span>
+                </span>
+              `).join('')}
+              ${site.techStack.length > 4 ? `<span class="vault-tech-chip">+${site.techStack.length - 4}</span>` : ''}
+            </div>
+          ` : ''}
 
           <div class="clone-actions">
             <button class="btn btn-success btn-xs preview-btn" data-folder="${site.folder}">
@@ -906,8 +943,10 @@ document.addEventListener('DOMContentLoaded', () => {
     playClickSound();
     viewLiveBtn.classList.add('active');
     viewInspectorBtn.classList.remove('active');
+    if (viewAuditBtn) viewAuditBtn.classList.remove('active');
     previewStage.classList.remove('hidden');
     inspectorStage.classList.add('hidden');
+    if (auditStage) auditStage.classList.add('hidden');
     viewportControls.classList.remove('hidden');
   });
 
@@ -915,14 +954,179 @@ document.addEventListener('DOMContentLoaded', () => {
     playClickSound();
     viewInspectorBtn.classList.add('active');
     viewLiveBtn.classList.remove('active');
+    if (viewAuditBtn) viewAuditBtn.classList.remove('active');
     previewStage.classList.add('hidden');
     inspectorStage.classList.remove('hidden');
+    if (auditStage) auditStage.classList.add('hidden');
     viewportControls.classList.add('hidden');
 
     if (activePreviewFolder && loadedTreeFolder !== activePreviewFolder) {
       loadAssetTree(activePreviewFolder);
     }
   });
+
+  if (viewAuditBtn) {
+    viewAuditBtn.addEventListener('click', () => {
+      playClickSound();
+      viewAuditBtn.classList.add('active');
+      viewLiveBtn.classList.remove('active');
+      viewInspectorBtn.classList.remove('active');
+      previewStage.classList.add('hidden');
+      inspectorStage.classList.add('hidden');
+      if (auditStage) auditStage.classList.remove('hidden');
+      viewportControls.classList.add('hidden');
+
+      if (activePreviewFolder) {
+        loadSecurityAudit(activePreviewFolder);
+      }
+    });
+  }
+
+  // Security Audit Controller
+  async function loadSecurityAudit(folderName, forceRefresh = false) {
+    if (!forceRefresh && cachedAuditReport && cachedAuditReport.folder === folderName) {
+      renderAuditDashboard(cachedAuditReport.data);
+      if (cachedTechReport && cachedTechReport.folder === folderName) {
+        renderTechChips(cachedTechReport.data);
+      }
+      return;
+    }
+
+    if (auditGradeText) auditGradeText.textContent = '...';
+    if (auditScoreNum) auditScoreNum.textContent = '--';
+    if (auditFindingsList) auditFindingsList.innerHTML = '<div class="findings-empty-state">Running heuristic static analysis & vulnerability scan...</div>';
+    if (auditTechPills) auditTechPills.innerHTML = '<span class="tech-chip-loading">Fingerprinting web technologies...</span>';
+
+    try {
+      const [auditRes, techRes] = await Promise.all([
+        fetch(`/api/clones/${folderName}/audit`),
+        fetch(`/api/clones/${folderName}/tech`)
+      ]);
+
+      const auditData = await auditRes.json();
+      const techData = await techRes.json();
+
+      cachedAuditReport = { folder: folderName, data: auditData };
+      cachedTechReport = { folder: folderName, data: techData };
+
+      renderAuditDashboard(auditData);
+      renderTechChips(techData);
+    } catch (err) {
+      if (auditFindingsList) {
+        auditFindingsList.innerHTML = `<div class="findings-empty-state" style="color:var(--accent-rose);">Error running security audit: ${err.message}</div>`;
+      }
+    }
+  }
+
+  function renderAuditDashboard(audit) {
+    if (auditGradeText) auditGradeText.textContent = audit.grade || 'A+';
+    if (auditScoreNum) auditScoreNum.textContent = audit.score ?? 100;
+    
+    if (auditGradeCircle) {
+      const gradeClass = (audit.grade || 'a').toLowerCase().replace('+', '');
+      auditGradeCircle.className = `audit-grade-circle grade-${gradeClass}`;
+    }
+    
+    if (auditRiskBadge) {
+      auditRiskBadge.textContent = audit.riskLevel || 'CLEAN';
+      const riskClass = (audit.riskLevel || '').toLowerCase().replace(/\s+/g, '-');
+      auditRiskBadge.className = `audit-risk-badge ${riskClass === 'clean' ? 'clean' : (riskClass === 'moderate' ? 'moderate' : 'high-risk')}`;
+    }
+
+    if (audit.stats) {
+      if (auditCriticalCount) auditCriticalCount.textContent = audit.stats.criticalCount || 0;
+      if (auditHighCount) auditHighCount.textContent = audit.stats.highCount || 0;
+      if (auditMediumCount) auditMediumCount.textContent = audit.stats.mediumCount || 0;
+      if (auditLowCount) auditLowCount.textContent = audit.stats.lowCount || 0;
+      if (findingsCountBadge) findingsCountBadge.textContent = `${audit.stats.totalFindings || 0} findings (${audit.stats.totalFilesScanned || 0} files scanned)`;
+
+      if (auditGradeSubtitle) {
+        if (audit.stats.totalFindings === 0) {
+          auditGradeSubtitle.textContent = `Clean repository: All ${audit.stats.totalFilesScanned} files passed static checks with 0 vulnerabilities.`;
+        } else {
+          auditGradeSubtitle.textContent = `Identified ${audit.stats.totalFindings} potential risk patterns across ${audit.stats.filesAffected} files.`;
+        }
+      }
+    }
+
+    if (auditFindingsList) {
+      if (!audit.findings || audit.findings.length === 0) {
+        auditFindingsList.innerHTML = `
+          <div class="findings-empty-state">
+            <div class="aceternity-icon-pod glow-emerald" style="width:52px; height:52px; margin:0 auto 0.75rem;">
+              <i data-lucide="shield-check" class="icon-lg"></i>
+            </div>
+            <h4 style="color:#fff; margin-bottom:0.25rem;">Zero Security Vulnerabilities Detected</h4>
+            <p style="font-size:0.8rem; color:var(--text-secondary);">No dynamic eval sinks, obfuscation chains, or cryptominers found.</p>
+          </div>
+        `;
+      } else {
+        auditFindingsList.innerHTML = audit.findings.map(f => `
+          <div class="finding-card ${f.severity.toLowerCase()}">
+            <div class="finding-header-row">
+              <div class="finding-title-group">
+                <span class="finding-severity-pill ${f.severity.toLowerCase()}">${f.severity}</span>
+                <span class="finding-title">${f.title}</span>
+              </div>
+              <span class="finding-location">${f.file} : line ${f.line}</span>
+            </div>
+            <div class="finding-desc">${f.description}</div>
+            ${f.snippet ? `<pre class="finding-snippet"><code>${f.snippet}</code></pre>` : ''}
+            <div class="finding-recommendation">
+              <i data-lucide="info" class="icon-xs"></i>
+              <span>${f.recommendation}</span>
+            </div>
+          </div>
+        `).join('');
+      }
+    }
+
+    if (window.lucide) window.lucide.createIcons();
+  }
+
+  function renderTechChips(tech) {
+    if (!auditTechPills) return;
+    if (!tech.technologies || tech.technologies.length === 0) {
+      auditTechPills.innerHTML = '<span class="tech-chip-loading">Standard Web Architecture (HTML5, Vanilla CSS & JS)</span>';
+      return;
+    }
+
+    auditTechPills.innerHTML = tech.technologies.map(t => `
+      <span class="tech-chip" title="${t.category}">
+        <span class="tech-chip-dot" style="background:${t.color || '#38bdf8'}; box-shadow:0 0 8px ${t.color || '#38bdf8'}"></span>
+        <span>${t.name}</span>
+        <span class="tech-category-tag">${t.category}</span>
+      </span>
+    `).join('');
+  }
+
+  if (rescanAuditBtn) {
+    rescanAuditBtn.addEventListener('click', async () => {
+      playClickSound();
+      const icon = rescanAuditBtn.querySelector('[data-lucide], svg');
+      if (icon) icon.classList.add('spin-icon');
+      if (activePreviewFolder) {
+        await loadSecurityAudit(activePreviewFolder, true);
+        showToast({ title: 'Audit Refreshed', message: 'Security scan updated for this archive', type: 'info', duration: 2000 });
+      }
+      setTimeout(() => { if (icon) icon.classList.remove('spin-icon'); }, 600);
+    });
+  }
+
+  if (downloadAuditReportBtn) {
+    downloadAuditReportBtn.addEventListener('click', () => {
+      playClickSound();
+      if (!cachedAuditReport || !cachedAuditReport.data) return;
+      const blob = new Blob([JSON.stringify(cachedAuditReport.data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `security-audit-${activePreviewFolder || 'site'}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast({ title: 'Report Exported', message: 'Security audit JSON report downloaded', type: 'success' });
+    });
+  }
 
   // Viewport Telemetry & Dimension Readout
   function updateDimensionTelemetry() {
@@ -1350,8 +1554,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Reset default view state
     viewLiveBtn.classList.add('active');
     viewInspectorBtn.classList.remove('active');
+    if (viewAuditBtn) viewAuditBtn.classList.remove('active');
     previewStage.classList.remove('hidden');
     inspectorStage.classList.add('hidden');
+    if (auditStage) auditStage.classList.add('hidden');
     viewportControls.classList.remove('hidden');
 
     // Reset zoom and fullscreen

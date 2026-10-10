@@ -489,7 +489,7 @@
           <span class="dot green"></span>
         </div>
 
-        <!-- Mode Toggle: Live View vs Code & Asset Inspector with Aceternity Lucide Icons -->
+        <!-- Mode Toggle: Live View vs Code & Asset Inspector vs Security Audit -->
         <div class="studio-mode-switcher">
           <button id="viewLiveBtn" class="studio-tab active">
             <i data-lucide="globe" class="icon-xs"></i>
@@ -498,6 +498,10 @@
           <button id="viewInspectorBtn" class="studio-tab">
             <i data-lucide="folder-tree" class="icon-xs"></i>
             <span>Asset Inspector</span>
+          </button>
+          <button id="viewAuditBtn" class="studio-tab">
+            <i data-lucide="shield-alert" class="icon-xs"></i>
+            <span>Security Audit</span>
           </button>
         </div>
 
@@ -630,6 +634,80 @@
               <img id="imagePreviewImg" src="" alt="Asset Preview">
               <div class="image-preview-meta" id="imagePreviewMeta"></div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stage 3: Security & Privacy Audit Stage -->
+      <div class="audit-stage hidden" id="auditStage">
+        <div class="audit-dashboard-header">
+          <!-- Grade Score Card -->
+          <div class="audit-grade-card" id="auditGradeCard">
+            <div class="audit-grade-circle grade-a" id="auditGradeCircle">
+              <span class="audit-grade-text" id="auditGradeText">A+</span>
+            </div>
+            <div class="audit-grade-info">
+              <div class="audit-score-row">
+                <span class="audit-score-num" id="auditScoreNum">100</span>
+                <span class="audit-score-max">/ 100</span>
+                <span class="audit-risk-badge clean" id="auditRiskBadge">CLEAN</span>
+              </div>
+              <p class="audit-grade-subtitle" id="auditGradeSubtitle">Autonomous Heuristic AST Security Scan Complete</p>
+            </div>
+          </div>
+
+          <!-- Severity Counters -->
+          <div class="audit-metrics-grid">
+            <div class="audit-metric-card critical">
+              <div class="audit-metric-num" id="auditCriticalCount">0</div>
+              <div class="audit-metric-label">Critical</div>
+            </div>
+            <div class="audit-metric-card high">
+              <div class="audit-metric-num" id="auditHighCount">0</div>
+              <div class="audit-metric-label">High Risk</div>
+            </div>
+            <div class="audit-metric-card medium">
+              <div class="audit-metric-num" id="auditMediumCount">0</div>
+              <div class="audit-metric-label">Warnings</div>
+            </div>
+            <div class="audit-metric-card low">
+              <div class="audit-metric-num" id="auditLowCount">0</div>
+              <div class="audit-metric-label">Low / Info</div>
+            </div>
+          </div>
+
+          <!-- Header Actions -->
+          <div class="audit-header-actions">
+            <button id="rescanAuditBtn" class="btn btn-secondary btn-xs">
+              <i data-lucide="refresh-cw" class="icon-xs"></i>
+              <span>Re-scan</span>
+            </button>
+            <button id="downloadAuditReportBtn" class="btn btn-secondary btn-xs">
+              <i data-lucide="download" class="icon-xs"></i>
+              <span>Export JSON</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Detected Tech Stack Section -->
+        <div class="audit-tech-section">
+          <div class="audit-tech-title">
+            <i data-lucide="cpu" class="icon-xs"></i>
+            <span>AUTONOMOUS TECH STACK FINGERPRINT</span>
+          </div>
+          <div class="audit-tech-pills" id="auditTechPills">
+            <span class="tech-chip-loading">Detecting technologies...</span>
+          </div>
+        </div>
+
+        <!-- Vulnerability Findings List -->
+        <div class="audit-findings-section">
+          <div class="audit-findings-header">
+            <h4>STATIC SECURITY SINK & HEURISTIC FINDINGS</h4>
+            <span class="findings-count-badge" id="findingsCountBadge">0 findings</span>
+          </div>
+          <div class="audit-findings-list" id="auditFindingsList">
+            <!-- Dynamic findings populate here -->
           </div>
         </div>
       </div>

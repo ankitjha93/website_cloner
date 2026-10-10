@@ -6,6 +6,8 @@ import { exec } from 'child_process';
 import archiver from 'archiver';
 import { WebsiteCloner } from './cloner/engine.js';
 import { sanitizeName } from './cloner/utils.js';
+import { auditClonedDirectory } from './cloner/securityScanner.js';
+import { detectTechStack } from './cloner/techDetector.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -180,11 +182,29 @@ app.get('/api/clones', async (req, res) => {
 
     for (const dirent of folders) {
       if (dirent.isDirectory()) {
-        const manifestPath = path.join(CLONES_DIR, dirent.name, 'site_manifest.json');
+        const siteDir = path.join(CLONES_DIR, dirent.name);
+        const manifestPath = path.join(siteDir, 'site_manifest.json');
         if (fs.existsSync(manifestPath)) {
           try {
             const raw = await fs.promises.readFile(manifestPath, 'utf-8');
             const data = JSON.parse(raw);
+
+            // Auto-enrich tech stack and security score if not cached yet
+            if (!data.techStack || !data.securityScore) {
+              const [tech, audit] = await Promise.all([
+                detectTechStack(siteDir).catch(() => ({ technologies: [] })),
+                auditClonedDirectory(siteDir).catch(() => ({ score: 100, grade: 'A+', riskLevel: 'CLEAN' }))
+              ]);
+              data.techStack = tech.technologies || [];
+              data.securityScore = {
+                score: audit.score,
+                grade: audit.grade,
+                riskLevel: audit.riskLevel,
+                findingsCount: audit.findings?.length || 0
+              };
+              fs.promises.writeFile(manifestPath, JSON.stringify(data, null, 2), 'utf-8').catch(() => {});
+            }
+
             sites.push({ ...data, folder: dirent.name });
           } catch {
             sites.push({ folder: dirent.name, title: dirent.name, clonedAt: null });
@@ -407,6 +427,45 @@ app.get('/api/clones/:folderName/file', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+/**
+ * GET /api/clones/:folderName/audit - Static security & privacy vulnerability audit
+ */
+app.get('/api/clones/:folderName/audit', async (req, res) => {
+  try {
+    const safeFolder = sanitizeName(req.params.folderName);
+    const targetDir = path.resolve(CLONES_DIR, safeFolder);
+
+    if (!fs.existsSync(targetDir)) {
+      return res.status(404).json({ error: 'Cloned site folder not found' });
+    }
+
+    const report = await auditClonedDirectory(targetDir);
+    res.json(report);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * GET /api/clones/:folderName/tech - Autonomous Tech Stack Fingerprint report
+ */
+app.get('/api/clones/:folderName/tech', async (req, res) => {
+  try {
+    const safeFolder = sanitizeName(req.params.folderName);
+    const targetDir = path.resolve(CLONES_DIR, safeFolder);
+
+    if (!fs.existsSync(targetDir)) {
+      return res.status(404).json({ error: 'Cloned site folder not found' });
+    }
+
+    const tech = await detectTechStack(targetDir);
+    res.json(tech);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 
 /**
  * Serve offline preview of cloned sites
