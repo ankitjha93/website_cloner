@@ -4,6 +4,8 @@ import { EventEmitter } from 'events';
 import * as cheerio from 'cheerio';
 import { normalizeUrl, urlToLocalPath, getRelativePath, createProjectFolderName, formatBytes } from './utils.js';
 import { processCssContent } from './cssParser.js';
+import { TokenBucketRateLimiter } from './rateLimiter.js';
+import { RobotsParser } from './robotsParser.js';
 
 export class WebsiteCloner extends EventEmitter {
   constructor(options = {}) {
@@ -13,6 +15,14 @@ export class WebsiteCloner extends EventEmitter {
     this.maxPages = Number(options.maxPages) || 50;
     this.concurrency = Math.min(Math.max(Number(options.concurrency) || 5, 1), 15);
     
+    // Phase 2: Distributed resilience & compliance options
+    this.requestsPerSecond = Math.max(1, Number(options.requestsPerSecond) || 5);
+    this.rateLimiter = new TokenBucketRateLimiter(this.requestsPerSecond);
+    this.respectRobots = options.respectRobots !== false;
+    this.robotsParser = new RobotsParser();
+    this.maxAssetSizeBytes = Number(options.maxAssetSizeBytes) || 50 * 1024 * 1024; // 50MB safeguard
+    this.resume = options.resume === true;
+
     // Asset toggles
     this.downloadImages = options.downloadImages !== false;
     this.downloadCss = options.downloadCss !== false;
@@ -29,6 +39,7 @@ export class WebsiteCloner extends EventEmitter {
     this.outputBaseDir = options.outputBaseDir || path.resolve(process.cwd(), 'clones');
     this.folderName = options.folderName || createProjectFolderName(this.targetUrl);
     this.projectDir = path.join(this.outputBaseDir, this.folderName);
+    this.checkpointPath = path.join(this.projectDir, 'crawl_checkpoint.json');
 
     // State
     this.origin = null;
@@ -78,7 +89,71 @@ export class WebsiteCloner extends EventEmitter {
 
   cancel() {
     this.isCancelled = true;
-    this.log('warning', 'Cloning operation was cancelled by user.');
+    this.log('warning', 'Cloning operation was cancelled by user. Saving checkpoint...');
+    this.saveCheckpoint().catch(() => {});
+  }
+
+  /**
+   * Persists current crawl state to disk for crash recovery / resume
+   */
+  async saveCheckpoint() {
+    try {
+      const data = {
+        targetUrl: this.targetUrl,
+        folderName: this.folderName,
+        origin: this.origin,
+        hostname: this.hostname,
+        siteTitle: this.siteTitle,
+        favicon: this.favicon,
+        visitedUrls: Array.from(this.visitedUrls),
+        pageQueue: this.pageQueue,
+        queuedAssetUrls: Array.from(this.queuedAssetUrls),
+        assetQueue: this.assetQueue,
+        pagePathMap: Array.from(this.pagePathMap.entries()),
+        assetPathMap: Array.from(this.assetPathMap.entries()),
+        stats: this.stats,
+        savedAt: new Date().toISOString()
+      };
+      await fs.promises.mkdir(this.projectDir, { recursive: true });
+      await fs.promises.writeFile(this.checkpointPath, JSON.stringify(data, null, 2), 'utf-8');
+      this.log('info', `💾 Checkpoint saved: ${this.stats.pagesCrawled} pages, ${this.stats.assetsDownloaded} assets, ${this.pageQueue.length} pages queued.`);
+    } catch (err) {
+      this.log('warning', `Failed to save checkpoint: ${err.message}`);
+    }
+  }
+
+  /**
+   * Restores crawl state from existing checkpoint
+   */
+  async loadCheckpoint() {
+    try {
+      if (fs.existsSync(this.checkpointPath)) {
+        const raw = await fs.promises.readFile(this.checkpointPath, 'utf-8');
+        const data = JSON.parse(raw);
+        this.targetUrl = data.targetUrl || this.targetUrl;
+        this.origin = data.origin || this.origin;
+        this.hostname = data.hostname || this.hostname;
+        this.siteTitle = data.siteTitle || this.siteTitle;
+        this.favicon = data.favicon || this.favicon;
+        this.visitedUrls = new Set(data.visitedUrls || []);
+        this.pageQueue = data.pageQueue || [];
+        this.queuedAssetUrls = new Set(data.queuedAssetUrls || []);
+        this.assetQueue = data.assetQueue || [];
+        this.pagePathMap = new Map(data.pagePathMap || []);
+        this.assetPathMap = new Map(data.assetPathMap || []);
+        if (data.stats) {
+          this.stats.pagesCrawled = data.stats.pagesCrawled || 0;
+          this.stats.assetsDownloaded = data.stats.assetsDownloaded || 0;
+          this.stats.totalBytes = data.stats.totalBytes || 0;
+          this.stats.errors = data.stats.errors || 0;
+        }
+        this.log('success', `⚡ Resumed from checkpoint! Restored ${this.stats.pagesCrawled} pages, ${this.stats.assetsDownloaded} assets, ${this.pageQueue.length} queued pages.`);
+        return true;
+      }
+    } catch (err) {
+      this.log('warning', `Could not load checkpoint (${err.message}). Starting standard crawl.`);
+    }
+    return false;
   }
 
   isAllowedDomain(urlStr) {
@@ -106,17 +181,44 @@ export class WebsiteCloner extends EventEmitter {
 
     await fs.promises.mkdir(this.projectDir, { recursive: true });
 
-    this.log('info', `Starting clone of: ${normalizedRoot}`);
-    this.log('info', `Output directory: ${this.projectDir}`);
-    this.log('info', `Depth limit: ${this.maxDepth}, Page limit: ${this.maxPages}, Concurrency: ${this.concurrency}`);
+    let isResumed = false;
+    if (this.resume) {
+      isResumed = await this.loadCheckpoint();
+    }
 
-    this.pageQueue.push({ url: normalizedRoot, depth: 1 });
-    this.visitedUrls.add(normalizedRoot);
+    if (!isResumed) {
+      this.log('info', `Starting clone of: ${normalizedRoot}`);
+      this.log('info', `Output directory: ${this.projectDir}`);
+      this.log('info', `Depth limit: ${this.maxDepth}, Page limit: ${this.maxPages}, Concurrency: ${this.concurrency}, Rate: ${this.requestsPerSecond} req/s`);
+
+      this.pageQueue.push({ url: normalizedRoot, depth: 1 });
+      this.visitedUrls.add(normalizedRoot);
+    }
+
+    // Preflight Robots.txt RFC 9309 compliance
+    if (this.respectRobots) {
+      try {
+        const robotsUrl = `${this.origin}/robots.txt`;
+        const robotsRes = await this.fetchWithTimeout(robotsUrl, 'text', 8000, 1).catch(() => null);
+        if (robotsRes && robotsRes.data) {
+          this.robotsParser.parse(robotsRes.data);
+          this.log('info', `🤖 robots.txt parsed: ${this.robotsParser.disallowRules.length} disallow rules found.`);
+          if (this.robotsParser.crawlDelay) {
+            const delayRps = 1 / this.robotsParser.crawlDelay;
+            this.rateLimiter.setRate(Math.min(this.rateLimiter.rps, delayRps));
+            this.log('info', `⏱️ robots.txt crawl-delay (${this.robotsParser.crawlDelay}s) enforced. Rate adjusted to ${this.rateLimiter.rps.toFixed(2)} req/s.`);
+          }
+        }
+      } catch (err) {
+        this.log('info', `Notice: robots.txt not reachable (${err.message}). Proceeding with standard crawl.`);
+      }
+    }
 
     this.emit('start', {
       folderName: this.folderName,
       targetUrl: normalizedRoot,
-      projectDir: this.projectDir
+      projectDir: this.projectDir,
+      isResumed
     });
 
     // Main crawling loop
@@ -140,6 +242,12 @@ export class WebsiteCloner extends EventEmitter {
       }
     }
 
+    if (this.isCancelled) {
+      await this.saveCheckpoint();
+      this.emitProgress('Cancelled');
+      return null;
+    }
+
     this.stats.endTime = Date.now();
     const durationSec = ((this.stats.endTime - this.stats.startTime) / 1000).toFixed(1);
 
@@ -161,7 +269,9 @@ export class WebsiteCloner extends EventEmitter {
       options: {
         maxDepth: this.maxDepth,
         maxPages: this.maxPages,
-        sameDomainOnly: this.sameDomainOnly
+        sameDomainOnly: this.sameDomainOnly,
+        requestsPerSecond: this.requestsPerSecond,
+        respectRobots: this.respectRobots
       },
       rootHtml: 'index.html'
     };
@@ -172,6 +282,9 @@ export class WebsiteCloner extends EventEmitter {
       'utf-8'
     );
 
+    // Cleanup checkpoint file upon complete success
+    await fs.promises.unlink(this.checkpointPath).catch(() => {});
+
     this.log('success', `Completed clone! ${this.stats.pagesCrawled} pages, ${this.stats.assetsDownloaded} assets, ${formatBytes(this.stats.totalBytes)} in ${durationSec}s`);
     this.emitProgress('Completed');
 
@@ -179,44 +292,89 @@ export class WebsiteCloner extends EventEmitter {
     return manifest;
   }
 
-  async fetchWithTimeout(url, responseType = 'text', timeoutMs = 15000) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+  /**
+   * Resilient HTTP fetcher with Token-Bucket rate limiting, exponential backoff, and memory guard
+   */
+  async fetchWithTimeout(url, responseType = 'text', timeoutMs = 15000, maxRetries = 3) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (this.isCancelled) throw new Error('Cancelled');
 
-    try {
-      const response = await fetch(url, {
-        signal: controller.signal,
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.9',
-          'Cache-Control': 'no-cache'
+      // Consume 1 token from bucket before making network request
+      await this.rateLimiter.consume(1);
+
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+      try {
+        const response = await fetch(url, {
+          signal: controller.signal,
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 MirroX/2.5',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Cache-Control': 'no-cache'
+          }
+        });
+        clearTimeout(timer);
+
+        // Exponential backoff with jitter on 429 (Too Many Requests) or 503 (Service Unavailable)
+        if (response.status === 429 || response.status === 503) {
+          if (attempt < maxRetries) {
+            const delay = await this.rateLimiter.waitBackoff(attempt);
+            this.log('warning', `⚠️ HTTP ${response.status} on ${url}. Backing off for ${delay}ms (retry ${attempt + 1}/${maxRetries})...`);
+            continue;
+          }
         }
-      });
-      clearTimeout(timer);
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status} ${response.statusText}`);
+        }
+
+        // Memory bounds check: abort if file > maxAssetSizeBytes (e.g. 50MB)
+        const contentLength = parseInt(response.headers.get('content-length') || '0', 10);
+        if (contentLength > this.maxAssetSizeBytes) {
+          throw new Error(`Asset exceeded max memory guard (${formatBytes(contentLength)} > ${formatBytes(this.maxAssetSizeBytes)})`);
+        }
+
+        const contentType = response.headers.get('content-type') || '';
+        let data;
+        if (responseType === 'buffer') {
+          const arrayBuffer = await response.arrayBuffer();
+          if (arrayBuffer.byteLength > this.maxAssetSizeBytes) {
+            throw new Error(`Asset buffer exceeded memory bound of ${formatBytes(this.maxAssetSizeBytes)}`);
+          }
+          data = Buffer.from(arrayBuffer);
+        } else {
+          data = await response.text();
+        }
+
+        return { data, contentType, status: response.status };
+      } catch (err) {
+        clearTimeout(timer);
+        if (attempt < maxRetries && (err.name === 'AbortError' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT')) {
+          const delay = await this.rateLimiter.waitBackoff(attempt);
+          this.log('warning', `Network hiccup (${err.message}) on ${url}. Retrying in ${delay}ms...`);
+          continue;
+        }
+        throw err;
       }
-
-      const contentType = response.headers.get('content-type') || '';
-      let data;
-      if (responseType === 'buffer') {
-        const arrayBuffer = await response.arrayBuffer();
-        data = Buffer.from(arrayBuffer);
-      } else {
-        data = await response.text();
-      }
-
-      return { data, contentType, status: response.status };
-    } catch (err) {
-      clearTimeout(timer);
-      throw err;
     }
   }
 
   async processPage(pageUrl, depth) {
     if (this.isCancelled) return;
+
+    // Robots.txt exclusion check
+    if (this.respectRobots) {
+      try {
+        const u = new URL(pageUrl);
+        if (!this.robotsParser.isAllowed(u.pathname)) {
+          this.log('warning', `🤖 Disallowed by robots.txt directive: ${pageUrl}`);
+          return;
+        }
+      } catch {}
+    }
+
     this.log('info', `Crawling [D${depth}] ${pageUrl}`);
 
     let htmlContent = '';
@@ -478,17 +636,30 @@ export class WebsiteCloner extends EventEmitter {
     this.stats.pagesCrawled++;
     this.log('success', `Saved: ${localRelativePath} (Total pages: ${this.stats.pagesCrawled})`);
     this.emitProgress();
+
+    // Periodic checkpoint save every 3 pages
+    if (this.stats.pagesCrawled % 3 === 0) {
+      await this.saveCheckpoint();
+    }
   }
 
   async downloadAsset(assetUrl, type) {
     if (this.isCancelled) return;
+
+    // Fast-path resume: If asset is already saved on local disk, skip network download
+    const localRelativePath = this.assetPathMap.get(assetUrl) || urlToLocalPath(assetUrl, this.origin);
+    const filePath = path.join(this.projectDir, localRelativePath);
+    if (fs.existsSync(filePath)) {
+      this.stats.assetsDownloaded++;
+      this.emitProgress();
+      return;
+    }
 
     try {
       const isCss = type === 'stylesheet' || assetUrl.endsWith('.css');
       const res = await this.fetchWithTimeout(assetUrl, isCss ? 'text' : 'buffer');
 
       let content = res.data;
-      const localRelativePath = this.assetPathMap.get(assetUrl) || urlToLocalPath(assetUrl, this.origin, res.contentType);
 
       // If CSS, process nested urls for fonts and images
       if (isCss && typeof content === 'string') {

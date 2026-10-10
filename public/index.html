@@ -188,6 +188,13 @@
                   <input type="range" id="concurrencyInput" min="1" max="15" value="6" class="slider">
                 </div>
 
+                <!-- Rate Limiter (Token Bucket) -->
+                <div class="setting-item">
+                  <label for="rpsInput">Rate Limit: <strong id="rpsVal">5</strong> req/sec</label>
+                  <p class="setting-sub">Token-bucket throttle preventing HTTP 429 backoff</p>
+                  <input type="range" id="rpsInput" min="1" max="25" value="5" class="slider">
+                </div>
+
                 <!-- Hidden Depth input for sync -->
                 <input type="hidden" id="depthInput" value="2">
 
@@ -297,6 +304,20 @@
                           <strong>Clean Clone Mode</strong>
                         </div>
                         <span>Strip ads, analytics & cookie popups</span>
+                      </div>
+                    </label>
+
+                    <label class="asset-toggle-card">
+                      <div class="neon-switch">
+                        <input type="checkbox" id="toggleRobots" checked>
+                        <span class="switch-slider"></span>
+                      </div>
+                      <div class="asset-info">
+                        <div class="asset-header-row">
+                          <span class="aceternity-icon-pod glow-indigo"><i data-lucide="bot" class="icon-xs"></i></span>
+                          <strong>Robots.txt RFC 9309</strong>
+                        </div>
+                        <span>Preflight rules & honor Crawl-delay</span>
                       </div>
                     </label>
                   </div>

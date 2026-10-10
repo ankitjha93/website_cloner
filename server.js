@@ -44,7 +44,9 @@ app.post('/api/clone', async (req, res) => {
       downloadMedia = false,
       sameDomainOnly = true,
       allowSubdomains = false,
-      stripTrackers = true
+      stripTrackers = true,
+      requestsPerSecond = 5,
+      respectRobots = true
     } = req.body;
 
     if (!url || typeof url !== 'string') {
@@ -65,6 +67,8 @@ app.post('/api/clone', async (req, res) => {
       sameDomainOnly,
       allowSubdomains,
       stripTrackers,
+      requestsPerSecond: Math.max(1, Number(requestsPerSecond) || 5),
+      respectRobots: respectRobots !== false,
       outputBaseDir: CLONES_DIR
     });
 
@@ -173,6 +177,83 @@ app.post('/api/clone/:id/cancel', (req, res) => {
 });
 
 /**
+ * POST /api/clone/resume - Resume an interrupted or cancelled crawl from disk checkpoint
+ */
+app.post('/api/clone/resume', async (req, res) => {
+  try {
+    const { folderName } = req.body;
+    if (!folderName) {
+      return res.status(400).json({ error: 'Folder name is required' });
+    }
+
+    const safeFolder = sanitizeName(folderName);
+    const siteDir = path.join(CLONES_DIR, safeFolder);
+    const checkpointPath = path.join(siteDir, 'crawl_checkpoint.json');
+
+    if (!fs.existsSync(checkpointPath)) {
+      return res.status(404).json({ error: 'No crawl checkpoint found for this site' });
+    }
+
+    const raw = await fs.promises.readFile(checkpointPath, 'utf-8');
+    const checkpointData = JSON.parse(raw);
+    const targetUrl = checkpointData.targetUrl;
+
+    const jobId = `job_resume_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const cloner = new WebsiteCloner({
+      targetUrl,
+      folderName: safeFolder,
+      resume: true,
+      outputBaseDir: CLONES_DIR
+    });
+
+    const jobData = {
+      id: jobId,
+      cloner,
+      sseClients: new Set(),
+      status: 'resuming',
+      folderName: safeFolder,
+      logs: []
+    };
+    activeJobs.set(jobId, jobData);
+
+    cloner.on('log', (logEntry) => {
+      jobData.logs.push(logEntry);
+      if (jobData.logs.length > 500) jobData.logs.shift();
+      broadcastJobEvent(jobId, 'log', logEntry);
+    });
+
+    cloner.on('progress', (progressData) => {
+      broadcastJobEvent(jobId, 'progress', progressData);
+    });
+
+    cloner.on('complete', (manifest) => {
+      jobData.status = 'completed';
+      broadcastJobEvent(jobId, 'complete', manifest);
+    });
+
+    cloner.on('error', (err) => {
+      jobData.status = 'error';
+      broadcastJobEvent(jobId, 'error', { message: err.message });
+    });
+
+    cloner.start().catch((err) => {
+      jobData.status = 'error';
+      broadcastJobEvent(jobId, 'error', { message: err.message });
+    });
+
+    res.json({
+      success: true,
+      jobId,
+      folderName: safeFolder,
+      targetUrl,
+      restoredPages: checkpointData.stats?.pagesCrawled || 0
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
  * GET /api/clones - Get all cloned websites
  */
 app.get('/api/clones', async (req, res) => {
@@ -184,6 +265,8 @@ app.get('/api/clones', async (req, res) => {
       if (dirent.isDirectory()) {
         const siteDir = path.join(CLONES_DIR, dirent.name);
         const manifestPath = path.join(siteDir, 'site_manifest.json');
+        const hasCheckpoint = fs.existsSync(path.join(siteDir, 'crawl_checkpoint.json'));
+
         if (fs.existsSync(manifestPath)) {
           try {
             const raw = await fs.promises.readFile(manifestPath, 'utf-8');
@@ -205,12 +288,12 @@ app.get('/api/clones', async (req, res) => {
               fs.promises.writeFile(manifestPath, JSON.stringify(data, null, 2), 'utf-8').catch(() => {});
             }
 
-            sites.push({ ...data, folder: dirent.name });
+            sites.push({ ...data, folder: dirent.name, hasCheckpoint });
           } catch {
-            sites.push({ folder: dirent.name, title: dirent.name, clonedAt: null });
+            sites.push({ folder: dirent.name, title: dirent.name, clonedAt: null, hasCheckpoint });
           }
         } else {
-          sites.push({ folder: dirent.name, title: dirent.name, clonedAt: null });
+          sites.push({ folder: dirent.name, title: dirent.name, clonedAt: null, hasCheckpoint });
         }
       }
     }

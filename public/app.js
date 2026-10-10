@@ -18,6 +18,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const maxPagesVal = document.getElementById('maxPagesVal');
   const concurrencyInput = document.getElementById('concurrencyInput');
   const concurrencyVal = document.getElementById('concurrencyVal');
+  const rpsInput = document.getElementById('rpsInput');
+  const rpsVal = document.getElementById('rpsVal');
 
   // Checkboxes
   const sameDomainOnly = document.getElementById('sameDomainOnly');
@@ -28,6 +30,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const toggleFonts = document.getElementById('toggleFonts');
   const toggleMedia = document.getElementById('toggleMedia');
   const toggleCleanMode = document.getElementById('toggleCleanMode');
+  const toggleRobots = document.getElementById('toggleRobots');
 
   // Sound Control
   const soundToggleBtn = document.getElementById('soundToggleBtn');
@@ -327,6 +330,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Slider bindings
   maxPagesInput.addEventListener('input', () => maxPagesVal.textContent = maxPagesInput.value);
   concurrencyInput.addEventListener('input', () => concurrencyVal.textContent = concurrencyInput.value);
+  if (rpsInput && rpsVal) {
+    rpsInput.addEventListener('input', () => rpsVal.textContent = rpsInput.value);
+  }
 
   // Accordion toggle
   toggleAdvancedBtn.addEventListener('click', () => {
@@ -557,7 +563,9 @@ document.addEventListener('DOMContentLoaded', () => {
       downloadJs: toggleJs.checked,
       downloadFonts: toggleFonts.checked,
       downloadMedia: toggleMedia.checked,
-      stripTrackers: toggleCleanMode ? toggleCleanMode.checked : true
+      stripTrackers: toggleCleanMode ? toggleCleanMode.checked : true,
+      requestsPerSecond: rpsInput ? parseInt(rpsInput.value, 10) : 5,
+      respectRobots: toggleRobots ? toggleRobots.checked : true
     };
 
     try {
@@ -748,6 +756,11 @@ document.addEventListener('DOMContentLoaded', () => {
             <span class="clone-meta-item"><i data-lucide="layers" class="icon-xs" style="color:var(--accent-cyan)"></i> ${pagesCount} ${pagesCount === 1 ? 'page' : 'pages'}</span>
             <span class="clone-meta-item"><i data-lucide="hard-drive" class="icon-xs" style="color:var(--accent-indigo)"></i> ${totalSize}</span>
             <span class="clone-meta-item"><i data-lucide="calendar" class="icon-xs" style="color:var(--text-muted)"></i> ${dateStr}</span>
+            ${site.hasCheckpoint ? `
+              <span class="vault-checkpoint-badge" title="Crawl was paused or interrupted. Ready to resume from checkpoint!">
+                <i data-lucide="rotate-ccw" class="icon-xs"></i> Paused
+              </span>
+            ` : ''}
             ${site.securityScore ? `
               <span class="vault-security-pill grade-${(site.securityScore.grade || 'A').toLowerCase().replace('+', '')}" title="Security Score: ${site.securityScore.score}/100 (${site.securityScore.riskLevel})">
                 <i data-lucide="shield-check" class="icon-xs"></i> ${site.securityScore.grade} (${site.securityScore.score})
@@ -768,6 +781,11 @@ document.addEventListener('DOMContentLoaded', () => {
           ` : ''}
 
           <div class="clone-actions">
+            ${site.hasCheckpoint ? `
+              <button class="btn btn-warning btn-xs resume-btn" data-folder="${site.folder}" title="Resume Crawl from Checkpoint">
+                <i data-lucide="play" class="icon-xs"></i> <span>Resume</span>
+              </button>
+            ` : ''}
             <button class="btn btn-success btn-xs preview-btn" data-folder="${site.folder}">
               <i data-lucide="eye" class="icon-xs"></i> <span>Preview</span>
             </button>
@@ -784,6 +802,13 @@ document.addEventListener('DOMContentLoaded', () => {
         `;
 
         apply3DTilt(card);
+
+        if (site.hasCheckpoint) {
+          const resBtn = card.querySelector('.resume-btn');
+          if (resBtn) {
+            resBtn.onclick = () => resumeCrawl(site.folder, site.title || site.folder);
+          }
+        }
 
         card.querySelector('.preview-btn').onclick = () => openPreviewModal(site.folder);
         
@@ -847,6 +872,57 @@ document.addEventListener('DOMContentLoaded', () => {
       if (window.lucide) window.lucide.createIcons();
     } catch (err) {
       console.error('Failed to load clones:', err);
+    }
+  }
+
+  // ==========================================
+  // Resume Crawl from Checkpoint Handler
+  // ==========================================
+  async function resumeCrawl(folder, title) {
+    playClickSound();
+    if (activeEventSource) {
+      activeEventSource.close();
+      activeEventSource = null;
+    }
+
+    startCloneBtn.disabled = true;
+    startCloneBtn.classList.add('btn-cloning-active');
+    startBtnText.textContent = 'Resuming...';
+
+    monitorSection.classList.remove('hidden');
+    completedActions.classList.add('hidden');
+    cancelJobBtn.classList.remove('hidden');
+    monitorStateTag.textContent = 'RESUMING ENGINE';
+    monitorTargetTitle.textContent = `Resuming: ${title}`;
+    terminalLogs.innerHTML = '';
+    updateRadialGauge(15);
+
+    monitorSection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+    showToast({
+      title: 'Resuming Crawl',
+      message: `Restoring queue & checkpoint for ${title}`,
+      type: 'info'
+    });
+
+    try {
+      const res = await fetch('/api/clone/resume', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderName: folder })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to resume crawl');
+
+      currentJobId = data.jobId;
+      currentFolderName = data.folderName;
+
+      appendLog({ type: 'success', message: `⚡ Checkpoint restored with ${data.restoredPages || 0} pages already processed.` });
+      connectProgressStream(currentJobId, 50);
+    } catch (err) {
+      appendLog({ type: 'error', message: `Resume Error: ${err.message}` });
+      resetStartButton();
+      showToast({ title: 'Resume Failed', message: err.message, type: 'danger' });
     }
   }
 

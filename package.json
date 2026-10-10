@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node test/test-cloner.js && node test/test-clean-mode.js && node test/test-security-scanner.js"
+    "test": "node test/test-cloner.js && node test/test-clean-mode.js && node test/test-security-scanner.js && node test/test-resilient-crawler.js"
   },
   "keywords": [
     "website-cloner",
