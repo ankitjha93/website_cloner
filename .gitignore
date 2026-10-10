@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+
+# Local Clone Archives & Downloads
+clones/
+
+# Test output
+test-output/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment & OS files
+.env
+.DS_Store
+Thumbs.db

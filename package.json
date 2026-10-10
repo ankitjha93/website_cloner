@@ -1,0 +1,25 @@
+{
+  "name": "mirrox",
+  "version": "2.0.0",
+  "description": "MirroX — Autonomous Offline Web Replicator & Deep Archiver",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node test/test-cloner.js && node test/test-clean-mode.js"
+  },
+  "keywords": [
+    "website-cloner",
+    "scraper",
+    "archiver",
+    "offline-browsing"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "cheerio": "^1.0.0",
+    "express": "^4.21.2"
+  }
+}
